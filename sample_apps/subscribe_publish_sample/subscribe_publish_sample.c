@@ -50,6 +50,8 @@ char ACHostAddr[255] = AWS_IOT_MQTT_HOST;
 static AC_AccessPoint g_struNode;
 static AC_ConnectInfo conn;
 
+static char AC_Version[500] = {0};
+
 /**
  * @brief Default MQTT port is pulled from the aws_iot_config.h
  */
@@ -102,6 +104,60 @@ int MQTTcallbackHandler(MQTTCallbackParams params) {
     aws_iot_mqtt_publish(&Params);
     
 	return 0;
+}
+
+#define AC_MODULE_NAME            "Test-xxx"
+#define AC_MODULE_VERSION         "MOD2016-05-13"
+#define AC_DEV_VERSION            "MCU2016-05-13"
+#define AC_HARDWARE_VERSION       "Hardware2016-05-13"
+
+int MQTTReportVersion(void)
+{
+    AC_DevInfo *version;
+    unsigned short len = 0;
+    unsigned short realLen = 0;
+    char pubTopic[256] = {0};
+    char msgTmp[300] = {0};
+    
+    char deviceId[]= AC_DEVICEID;
+	char domainName[] = AC_DOMAIN_NAME;
+	char subdomainName[] = AC_SUBDOMAIN_NAME;
+
+    printf("MQTTReportVersion\n");
+
+	MQTTMessageParams Msg = MQTTMessageParamsDefault;
+	Msg.qos = QOS_0;
+    
+    version = (AC_DevInfo *)msgTmp;
+    
+    version->modTypeLen = strlen(AC_MODULE_NAME);
+    version->modVersionLen = strlen(AC_MODULE_VERSION);
+    version->devVersionLen = strlen(AC_DEV_VERSION);
+    version->hardwareVersionLen = strlen(AC_HARDWARE_VERSION);
+
+    memcpy(version->pInfo, AC_MODULE_NAME, version->modTypeLen);
+    memcpy(&version->pInfo[version->modTypeLen], AC_MODULE_VERSION, version->modVersionLen);
+    memcpy(&version->pInfo[version->modTypeLen + version->modVersionLen], AC_DEV_VERSION, version->devVersionLen);
+    memcpy(&version->pInfo[version->modTypeLen + version->modVersionLen + version->devVersionLen], 
+           AC_HARDWARE_VERSION, 
+           version->hardwareVersionLen);
+
+    len = sizeof(AC_DevInfo) + version->modTypeLen + version->modVersionLen + version->devVersionLen + version->hardwareVersionLen;
+
+    printf("len is %d\n", len);
+    printf("str is %s\n", version->pInfo);
+
+	sprintf(pubTopic, "device/%s/%s/%s/out", domainName, subdomainName, deviceId);
+	MQTTPublishParams Params = MQTTPublishParamsDefault;
+	Params.pTopic = pubTopic;
+
+    Msg.pPayload = (void *)AC_Version;
+    
+    ACEventBuildMsg(39, 0, msgTmp, &realLen, AC_Version, len);
+
+	Msg.PayloadLen = realLen;
+	Params.MessageParams = Msg;
+	aws_iot_mqtt_publish(&Params);
 }
 
 void disconnectCallbackHandler(void) 
@@ -379,6 +435,13 @@ int main(int argc, char** argv) {
             
     }while(NONE_ERROR == ret);
 
+    /* report version */
+    while (1)
+    {
+        MQTTReportVersion();
+        sleep(1);
+    }
+    
 	/*
 	 * Enable Auto Reconnect functionality. Minimum and Maximum time of Exponential backoff are set in aws_iot_config.h
 	 *  #AWS_IOT_MQTT_MIN_RECONNECT_WAIT_INTERVAL
