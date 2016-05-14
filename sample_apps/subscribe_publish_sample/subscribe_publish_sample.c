@@ -42,6 +42,8 @@
 #include "MQTTClient.h"
 #include "AC_DeviceService.h"
 
+#define HTONS(n) (unsigned short)((((unsigned short) (n)) << 8) | (((unsigned short) (n)) >> 8))
+
 unsigned char g_u8MsgBuildBuffer[600];
 
 char HostAddress[255] = AWS_IOT_MQTT_HOST;      /* 以前是域名，现在当ip串用 */
@@ -50,7 +52,13 @@ char ACHostAddr[255] = AWS_IOT_MQTT_HOST;
 static AC_AccessPoint g_struNode;
 static AC_ConnectInfo conn;
 
-static char AC_Version[500] = {0};
+static char g_Payload[500] = {0};     /* including msg header */
+
+char deviceId[]= AC_DEVICEID;
+char domainName[] = AC_DOMAIN_NAME;
+char subdomainName[] = AC_SUBDOMAIN_NAME;
+
+char g_subTopic[256] = {0};
 
 /**
  * @brief Default MQTT port is pulled from the aws_iot_config.h
@@ -63,71 +71,119 @@ uint32_t port = AWS_IOT_MQTT_PORT;
 char certDirectory[PATH_MAX + 1] = "../../certs";
 
 
-//static unsigned int g_ConnectCount = 0;
-
-int MQTTcallbackHandler(MQTTCallbackParams params) {
-
-    unsigned short len = 0;
+IoT_Error_t ACMqttPublish(unsigned char msgCode, 
+                          unsigned char msgId,
+                          unsigned char *pbody,
+                          unsigned short len)
+{
     char pubTopic[256] = {0};
-    char deviceId[]= AC_DEVICEID;
-	char domainName[] = AC_DOMAIN_NAME;
-	char subdomainName[] = AC_SUBDOMAIN_NAME;
+    unsigned short realLen = 0;
+    MQTTPublishParams Params = MQTTPublishParamsDefault;
+	MQTTMessageParams Msg = MQTTMessageParamsDefault;    
+
+    sprintf(pubTopic, "device/%s/%s/%s/out", domainName, subdomainName, deviceId);
+
+    ACEventBuildMsg(msgCode, msgId, g_Payload, &realLen, pbody, len);
+
+	Msg.qos = QOS_0;
+	Msg.pPayload = (void *)g_Payload;
+    Msg.PayloadLen = realLen;
+
+	Params.pTopic = pubTopic;
+    Params.MessageParams = Msg;
+
+    return aws_iot_mqtt_publish(&Params);
+    
+}
+
+int MQTTParseOtaInfo(void *pInfo)
+{
+    if (NULL == pInfo)
+    {
+        return -1;
+    }
+    AC_DeviceOtaMeta *pOtaInfo;
+    AC_OtaUrl *pUrl;
+    unsigned char i = 0;
+    pOtaInfo = (AC_DeviceOtaMeta *)pInfo;
+
+    INFO("firmwareType is %d", pOtaInfo->firmwareType);
+    INFO("num is %d", pOtaInfo->num);
+    INFO("otaMode is %d", pOtaInfo->otaMode);
+    INFO("versionLen is %d", pOtaInfo->versionLen);
+
+    INFO("Version is %.*s", pOtaInfo->versionLen, pOtaInfo->pInfo);
+
+    for (i = 0; i < pOtaInfo->num; i++)
+    {
+        if (0 == i)
+        {
+            pUrl = (AC_OtaUrl *)(pOtaInfo->pInfo + pOtaInfo->versionLen);
+        }
+        else 
+        {
+            pUrl = (AC_OtaUrl *)((char *)pUrl + sizeof(AC_OtaUrl) + HTONS(pUrl->urlLen));
+        }
+        INFO("url fileType is %d", pUrl->fileType);
+        INFO("url urlLen is %d", HTONS(pUrl->urlLen));
+        INFO("url url is %.*s", HTONS(pUrl->urlLen), pUrl->url);
+    }
+    return 0;
+}
+
+int MQTTcallbackHandler(MQTTCallbackParams params)
+{
+    unsigned short len = 0;
+
     AC_MessageHead *pstruMsg;
+    void *p;
 
 	INFO("Subscribe callback");
 	INFO("%.*s\t%.*s",
 			(int)params.TopicNameLen, params.pTopicName,
 			(int)params.MessageParams.PayloadLen, (char*)params.MessageParams.pPayload);
+
     if (0 == params.MessageParams.PayloadLen)
     {
         /* maybe need to be modified */
         return GENERIC_ERROR;
     }
     pstruMsg = (AC_MessageHead *)params.MessageParams.pPayload;
+    p = (void *)(pstruMsg + 1);
+    /* TODO:crc check*/
 
-    sprintf(pubTopic, "device/%s/%s/%s/out", domainName, subdomainName, deviceId);
+    switch (pstruMsg->MsgCode)
+    {
+        case 40:
+            MQTTParseOtaInfo(p);
+            break;
+    }
 
-	MQTTMessageParams Msg = MQTTMessageParamsDefault;
-	Msg.qos = QOS_0;
-	char cPayload[100];
-
-    ACEventBuildMsg(102, pstruMsg->MsgId, cPayload, &len, NULL, 0);
-    
-	Msg.pPayload = (void *) cPayload;
-    Msg.PayloadLen = len;
-
-	MQTTPublishParams Params = MQTTPublishParamsDefault;
-	Params.pTopic = pubTopic;
-
-    Params.MessageParams = Msg;
-
-    aws_iot_mqtt_publish(&Params);
-    
-	return 0;
+    return (int)ACMqttPublish(102, pstruMsg->MsgId, NULL, 0);
 }
 
-#define AC_MODULE_NAME            "Test-xxx"
-#define AC_MODULE_VERSION         "MOD2016-05-13"
-#define AC_DEV_VERSION            "MCU2016-05-13"
-#define AC_HARDWARE_VERSION       "Hardware2016-05-13"
 
-int MQTTReportVersion(void)
+IoT_Error_t ACMqttSubscribe(void)
+{
+	sprintf(g_subTopic, "device/%s/%s/%s/in", domainName, subdomainName, deviceId);
+	MQTTSubscribeParams subParams = MQTTSubscribeParamsDefault;
+	subParams.mHandler = MQTTcallbackHandler;
+	subParams.pTopic = g_subTopic;
+	subParams.qos = QOS_0;  
+
+	INFO("Subscribing...");
+
+    return aws_iot_mqtt_subscribe(&subParams);
+}
+
+IoT_Error_t MQTTReportVersion(void)
 {
     AC_DevInfo *version;
     unsigned short len = 0;
-    unsigned short realLen = 0;
-    char pubTopic[256] = {0};
     char msgTmp[300] = {0};
     
-    char deviceId[]= AC_DEVICEID;
-	char domainName[] = AC_DOMAIN_NAME;
-	char subdomainName[] = AC_SUBDOMAIN_NAME;
-
     printf("MQTTReportVersion\n");
 
-	MQTTMessageParams Msg = MQTTMessageParamsDefault;
-	Msg.qos = QOS_0;
-    
     version = (AC_DevInfo *)msgTmp;
     
     version->modTypeLen = strlen(AC_MODULE_NAME);
@@ -147,17 +203,7 @@ int MQTTReportVersion(void)
     printf("len is %d\n", len);
     printf("str is %s\n", version->pInfo);
 
-	sprintf(pubTopic, "device/%s/%s/%s/out", domainName, subdomainName, deviceId);
-	MQTTPublishParams Params = MQTTPublishParamsDefault;
-	Params.pTopic = pubTopic;
-
-    Msg.pPayload = (void *)AC_Version;
-    
-    ACEventBuildMsg(39, 0, msgTmp, &realLen, AC_Version, len);
-
-	Msg.PayloadLen = realLen;
-	Params.MessageParams = Msg;
-	aws_iot_mqtt_publish(&Params);
+    return ACMqttPublish(39, 0, msgTmp, len);
 }
 
 void disconnectCallbackHandler(void) 
@@ -198,9 +244,6 @@ IoT_Error_t MQTTConnectCloud(void)
     unsigned char Password[100] = {0};
     char userName[100] = {0};
 	char clientId[256] = {0};
-    char deviceId[]= AC_DEVICEID;
-	char domainName[] = AC_DOMAIN_NAME;
-	char subdomainName[] = AC_SUBDOMAIN_NAME;
     time_t timestamp = time(NULL);
     int timeout = 3600;
     char chaccessKey[17] = {0};
@@ -300,7 +343,7 @@ int getNextAccessPoint(void)
         return -1;
     }
 
-    for (i = conn.currentNumber + 1; i <g_struNode.totalNum; i++)
+    for (i = conn.currentNumber + 1; i < g_struNode.totalNum; i++)
     {
         if (IPV4_TYPE == g_struNode.ap[i].type)
         {
@@ -385,21 +428,28 @@ int main(int argc, char** argv) {
     unsigned char Password[100] = {0};
     char userName[100] = {0};
 	char clientId[256] = {0};
-	char subTopic[256] = {0};
+	//char subTopic[256] = {0};
 	char pubTopic[256] = {0};
-    char deviceId[]= AC_DEVICEID;
-	char domainName[] = AC_DOMAIN_NAME;
-	char subdomainName[] = AC_SUBDOMAIN_NAME;
 
 	parseInputArgsForConnectParams(argc, argv);
 
 	INFO("\nAWS IoT SDK Version %d.%d.%d-%s\n", VERSION_MAJOR, VERSION_MINOR, VERSION_PATCH, VERSION_TAG);
     
-    iot_tls_set_host(ACHostAddr);
-    AC_RegisterAccessCallBack(getAccessPointAction);
+    (void)iot_tls_set_host(ACHostAddr);
+    (void)AC_RegisterAccessCallBack(getAccessPointAction);
 
-    AC_DeviceServiceInit(domainName, subdomainName, deviceId, "0-0-0");
-    AC_GetAccessPoints();
+    ret = AC_DeviceServiceInit(domainName, subdomainName, deviceId, "0-0-0");
+    if (0 != ret)
+    {
+        INFO("\nAC Init error\n");
+        return AC_INIT_ERROR;
+    }
+    ret = AC_GetAccessPoints();
+    if (0 != ret)
+    {
+        INFO("\nAC get access points error\n");
+        return AC_GET_ACCESS_POINTS_ERROR;
+    }
 
     while (0 == strcmp(HostAddress, "dev.ablecloud.cn"))
     {
@@ -407,7 +457,7 @@ int main(int argc, char** argv) {
 		sleep(1);
     }
 
-    printf("HostAddress is %s\n", HostAddress);
+    INFO("HostAddress is %s\n", HostAddress);
 	
     do
     {
@@ -434,13 +484,6 @@ int main(int argc, char** argv) {
         }
             
     }while(NONE_ERROR == ret);
-
-    /* report version */
-    while (1)
-    {
-        MQTTReportVersion();
-        sleep(1);
-    }
     
 	/*
 	 * Enable Auto Reconnect functionality. Minimum and Maximum time of Exponential backoff are set in aws_iot_config.h
@@ -452,36 +495,30 @@ int main(int argc, char** argv) {
 		ERROR("Unable to set Auto Reconnect to true - %d", rc);
 		return rc;
 	}
-	sprintf(subTopic, "device/%s/%s/%s/in", domainName, subdomainName, deviceId);
-	MQTTSubscribeParams subParams = MQTTSubscribeParamsDefault;
-	subParams.mHandler = MQTTcallbackHandler;
-	subParams.pTopic = subTopic;
-	subParams.qos = QOS_0;
 
-	if (NONE_ERROR == rc) {
-		INFO("Subscribing...");
-		rc = aws_iot_mqtt_subscribe(&subParams);
-		if (NONE_ERROR != rc) {
+    if (NONE_ERROR == rc)
+    {
+        rc = ACMqttSubscribe();
+		if (NONE_ERROR != rc) 
+        {
 			ERROR("Error subscribing,error is %d", rc);
 		}
-	}
+    }
 
-	MQTTMessageParams Msg = MQTTMessageParamsDefault;
-	Msg.qos = QOS_0;
-	char cPayload[100];
-	sprintf(cPayload, "%s : %d ", "hello from SDK", i);
-	Msg.pPayload = (void *) cPayload;
+    /* report version */
 
-	sprintf(pubTopic, "device/%s/%s/%s/out", domainName, subdomainName, deviceId);
-	MQTTPublishParams Params = MQTTPublishParamsDefault;
-	Params.pTopic = pubTopic;
-
+    MQTTReportVersion();
+    
 	if (publishCount != 0) {
 		infinitePublishFlag = false;
 	}
 
+	char cPayload[100];
+	sprintf(cPayload, "%s", "hello from SDK");
+
 	while ((NETWORK_ATTEMPTING_RECONNECT == rc || RECONNECT_SUCCESSFUL == rc || NONE_ERROR == rc)
-			&& (publishCount > 0 || infinitePublishFlag)) {
+			&& (publishCount > 0 || infinitePublishFlag)) 
+	{
 
 		//Max time the yield function will wait for read messages
 		rc = aws_iot_mqtt_yield(100);
@@ -493,11 +530,12 @@ int main(int argc, char** argv) {
 		}
 		INFO("-->sleep");
 		sleep(1);
-        ACEventBuildMsg(210, 0, cPayload, &len, NULL, 0);
-		//sprintf(cPayload, "%s : %d ", "hello from SDK", i++);
-		Msg.PayloadLen = len;
-		Params.MessageParams = Msg;
-		rc = aws_iot_mqtt_publish(&Params);
+
+        rc = ACMqttPublish(210, 0, cPayload, 14);
+        if (NONE_ERROR != rc)
+        {
+            ERROR("Publish error\n");
+        }
 		if (publishCount > 0) {
 			publishCount--;
 		}

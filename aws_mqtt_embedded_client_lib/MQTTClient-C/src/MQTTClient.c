@@ -771,6 +771,9 @@ unsigned short crc16_ccitt(const unsigned char *buf, unsigned int len)
 
 }
 
+#define AC_HTONS(n) (unsigned short)((((unsigned short) (n)) << 8) | (((unsigned short) (n)) >> 8))
+
+
 unsigned int  ACEventBuildMsg(unsigned char u8MsgCode,
                                    unsigned char u8MsgId,
                                    unsigned char *pu8Msg,
@@ -785,7 +788,7 @@ unsigned int  ACEventBuildMsg(unsigned char u8MsgCode,
     pstruMsg = (AC_MessageHead *)pu8Msg;
     pstruMsg->MsgCode = u8MsgCode;
     pstruMsg->MsgId = u8MsgId;  
-    pstruMsg->Payloadlen = u16PayloadLen;
+    pstruMsg->Payloadlen = AC_HTONS(u16PayloadLen);
     pstruMsg->Version = 1;
     pstruMsg->OptNum = 0;
     crc = crc16_ccitt((unsigned char*)(pstruMsg + 1),u16PayloadLen);
