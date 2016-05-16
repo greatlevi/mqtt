@@ -51,6 +51,7 @@ char ACHostAddr[255] = AWS_IOT_MQTT_HOST;
 
 static AC_AccessPoint g_struNode;
 static AC_ConnectInfo conn;
+static AC_DeviceOtaMeta g_struOtaMeta;
 
 static char g_Payload[500] = {0};     /* including msg header */
 
@@ -102,31 +103,62 @@ int MQTTParseOtaInfo(void *pInfo)
     {
         return -1;
     }
+    memset(&g_struOtaMeta, 0, sizeof(g_struOtaMeta));
     AC_DeviceOtaMeta *pOtaInfo;
     AC_OtaUrl *pUrl;
     unsigned char i = 0;
+    char path[64] = {0};
+    int ret = 0;
     pOtaInfo = (AC_DeviceOtaMeta *)pInfo;
 
-    INFO("firmwareType is %d", pOtaInfo->firmwareType);
-    INFO("num is %d", pOtaInfo->num);
-    INFO("otaMode is %d", pOtaInfo->otaMode);
-    INFO("versionLen is %d", pOtaInfo->versionLen);
+    g_struOtaMeta.firmwareType = pOtaInfo->firmwareType;
+    g_struOtaMeta.num = pOtaInfo->num;
+    g_struOtaMeta.otaMode = pOtaInfo->otaMode;
+    g_struOtaMeta.versionLen = pOtaInfo->versionLen;
+    memcpy(g_struOtaMeta.version, pOtaInfo->version, pOtaInfo->versionLen);
 
-    INFO("Version is %.*s", pOtaInfo->versionLen, pOtaInfo->pInfo);
+    INFO("firmwareType is %d", g_struOtaMeta.firmwareType);
+    INFO("num is %d", g_struOtaMeta.num);
+    INFO("otaMode is %d", g_struOtaMeta.otaMode);
+    INFO("versionLen is %d", g_struOtaMeta.versionLen);
+    INFO("Version is %s", g_struOtaMeta.version);
 
     for (i = 0; i < pOtaInfo->num; i++)
     {
         if (0 == i)
         {
-            pUrl = (AC_OtaUrl *)(pOtaInfo->pInfo + pOtaInfo->versionLen);
+            pUrl = (AC_OtaUrl *)(pOtaInfo->version + pOtaInfo->versionLen);
         }
         else 
         {
-            pUrl = (AC_OtaUrl *)((char *)pUrl + sizeof(AC_OtaUrl) + HTONS(pUrl->urlLen));
+            pUrl = (AC_OtaUrl *)((char *)pUrl + 6 + HTONS(pUrl->urlLen));
         }
-        INFO("url fileType is %d", pUrl->fileType);
-        INFO("url urlLen is %d", HTONS(pUrl->urlLen));
-        INFO("url url is %.*s", HTONS(pUrl->urlLen), pUrl->url);
+
+        g_struOtaMeta.url[i].fileType = pUrl->fileType;
+        g_struOtaMeta.url[i].checksum = HTONS(pUrl->checksum);
+        g_struOtaMeta.url[i].urlLen = HTONS(pUrl->urlLen);
+        memcpy(g_struOtaMeta.url[i].url, pUrl->url, HTONS(pUrl->urlLen));
+
+        INFO("url fileType is %d", g_struOtaMeta.url[i].fileType);
+        INFO("url checksum is %d", g_struOtaMeta.url[i].checksum);
+        INFO("url urlLen is %d", g_struOtaMeta.url[i].urlLen);
+        INFO("url url is %s", g_struOtaMeta.url[i].url);
+        
+    }
+
+    if (0 == g_struOtaMeta.num)
+    {
+        return -1;
+    }
+
+    for (i = 0; i < g_struOtaMeta.num; i++)
+    {
+        ret = AC_StartOtaProcess(g_struOtaMeta.url[i].url, g_struOtaMeta.url[i].fileType);
+
+        if(ret != 0)
+        {
+            return ret;
+        }
     }
     return 0;
 }
